@@ -189,7 +189,7 @@ jobs:
         with:
           fetch-depth: 0
           persist-credentials: false
-      - uses: arksenu/docprop@aa4ccd7e243a072a9d4aae1fc2a2f03a44fb4978
+      - uses: arksenu/docprop@7646bd9b9344cc2e5c5b8dae08ed568a6fc327c0
 ```
 
 The action installs Python 3.13 and doc-lattice 7.4.1, then runs `check --format json`.
@@ -221,9 +221,8 @@ This action only reports findings. It does not push sync commits or acknowledge
 links automatically. The merged [latent-signals integration PR](https://github.com/arksenu/latent-signals/pull/1)
 includes the previously synced product-brief copy; its stale user-flow links still
 need human review. Section quote findings use the same report and PR comment;
-the pinned example above is the initial release, so select a commit containing
-section quote support when using the new config. Meaning-change gating and graph
-lint remain separate roadmap items.
+the pinned example includes section quote support. Meaning-change gating and
+graph lint remain separate roadmap items.
 
 ## Commands
 
