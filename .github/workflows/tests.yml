@@ -18,13 +18,13 @@ jobs:
           python-version: '3.13'
       - run: python -I -m pip install 'doc-lattice==7.4.1'
       - run: python -B -m unittest -q test_docprop test_doc_rewrite test_github_action
-      - name: Prepare mirror drift smoke test
+      - name: Prepare section quote drift smoke test
         shell: bash
         run: |
           mkdir "$RUNNER_TEMP/docprop-smoke"
-          printf '# Brief\nCurrent wording.\n' > "$RUNNER_TEMP/docprop-smoke/source.md"
-          printf '# Brief\nOld wording.\n' > "$RUNNER_TEMP/docprop-smoke/copy.md"
-          printf '[[mirror]]\ncanonical = "source.md"\ncopy = "copy.md"\n' > "$RUNNER_TEMP/docprop-smoke/.docprop.toml"
+          printf '## Pricing {#price}\nCurrent wording.\n' > "$RUNNER_TEMP/docprop-smoke/source.md"
+          printf '## Summary {#quote-price}\nOld wording.\n' > "$RUNNER_TEMP/docprop-smoke/copy.md"
+          printf '[[mirror]]\ncanonical = "source.md"\ncopy = "copy.md"\ncanonical_section = "price"\ncopy_section = "quote-price"\n' > "$RUNNER_TEMP/docprop-smoke/.docprop.toml"
       - uses: ./
         id: smoke
         with:

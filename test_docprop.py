@@ -14,6 +14,7 @@ import subprocess
 import tempfile
 import textwrap
 import unittest
+from unittest.mock import patch
 
 import docprop
 
@@ -163,6 +164,175 @@ class MirrorTests(unittest.TestCase):
         code, _, err = run_main("sync", "brief.md", "--repo", str(self.repo))
         self.assertEqual(code, docprop.EXIT_ERROR)
         self.assertIn("not a declared mirror copy", err)
+
+
+@unittest.skipUnless(LATTICE.is_file(), "doc-lattice is not installed")
+class SectionQuoteTests(unittest.TestCase):
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.tmp.cleanup)
+        self.repo = Path(self.tmp.name).resolve()
+        self.source = self.repo / "source.md"
+        self.copy = self.repo / "copy.md"
+        self.config = self.repo / ".docprop.toml"
+        self.source.write_text("# Source\n\n## Prices {#price}\n\nCosts $25.\n\n"
+                               "### Seats\n\nIncludes 5 seats.\n\n## Other\nSource only.\n")
+        self.prefix = "<!-- retained -->\n# Copy\n\nIntroduction.\n\n## Our pricing {#quote-price}\n"
+        self.suffix = "## Next\n\nKeep this exactly.  \n"
+        self.copy.write_text(self.prefix + "\nCosts $20.\n\n" + self.suffix)
+        self.config.write_text('[[mirror]]\ncanonical = "source.md"\ncopy = "copy.md"\n'
+                               'canonical_section = "price"\ncopy_section = "quote-price"\n')
+
+    def check(self):
+        code, out, err = run_main("check", "--repo", str(self.repo), "--format", "json")
+        self.assertNotEqual(code, docprop.EXIT_ERROR, err)
+        return code, json.loads(out)
+
+    def sync(self, section="quote-price"):
+        return run_main("sync", "copy.md", "--section", section, "--repo", str(self.repo))
+
+    def test_quote_sync_preserves_heading_surroundings_mode_and_is_idempotent(self):
+        code, report = self.check()
+        self.assertEqual(code, docprop.EXIT_FINDINGS)
+        [item] = report["mirrors"]
+        self.assertEqual(item["copy_section"], "quote-price")
+        self.assertEqual(item["canonical_section"], "price")
+        self.assertIn("--section quote-price", item["sync"])
+        self.assertNotIn("Source only", "\n".join(item["diff"]))
+        self.copy.chmod(0o640)
+        self.assertEqual(self.sync()[0], docprop.EXIT_CLEAN)
+        after = self.copy.read_bytes()
+        self.assertTrue(after.startswith(self.prefix.encode()))
+        self.assertTrue(after.endswith(self.suffix.encode()))
+        self.assertIn(b"### Seats\n\nIncludes 5 seats.", after)
+        self.assertNotIn(b"## Prices", after)
+        self.assertEqual(self.copy.stat().st_mode & 0o777, 0o640)
+        self.assertEqual(self.check()[0], docprop.EXIT_CLEAN)
+        self.assertIn("nothing written", self.sync()[1])
+        self.assertEqual(self.copy.read_bytes(), after)
+        self.source.write_text(self.source.read_text().replace("Source only", "Unrelated edit"))
+        self.assertEqual(self.check()[0], docprop.EXIT_CLEAN)
+        self.source.write_text(self.source.read_text().replace("Costs $25", "Costs $30"))
+        self.assertEqual(self.check()[0], docprop.EXIT_FINDINGS)
+
+    def test_newlines_metadata_fences_and_unicode_separators(self):
+        self.source.write_text("## Source {#price}\n\n```markdown\n## Example only\n```\n"
+                               "A\u2028## Still one line\n")
+        for newline in ("\n", "\r\n", "\r"):
+            with self.subTest(newline=repr(newline)):
+                prefix = ("---\nid: copy\n---\n" + self.prefix).replace("\n", newline)
+                # Mixed newlines outside the selection must remain byte-for-byte intact.
+                suffix = self.suffix.replace("\n", "\r\n")
+                self.copy.write_bytes((prefix + newline + "Old." + newline + suffix).encode())
+                code, _, err = self.sync()
+                self.assertEqual(code, docprop.EXIT_CLEAN, err)
+                result = self.copy.read_bytes()
+                self.assertTrue(result.startswith(prefix.encode()))
+                self.assertTrue(result.endswith(suffix.encode()))
+                self.assertIn("A\u2028## Still one line".encode(), result)
+                self.assertEqual(self.check()[0], docprop.EXIT_CLEAN)
+
+    def test_explicit_ids_survive_heading_renames(self):
+        self.source.write_text(self.source.read_text().replace("Prices {#price}", "New prices {#price}"))
+        self.copy.write_text(self.copy.read_text().replace("Our pricing {#quote-price}", "Fees {#quote-price}"))
+        self.assertEqual(self.sync()[0], docprop.EXIT_CLEAN)
+        self.assertIn("## Fees {#quote-price}", self.copy.read_text())
+        self.assertEqual(self.check()[0], docprop.EXIT_CLEAN)
+
+    def test_end_of_file_without_newline_and_empty_destination(self):
+        self.source.write_text("## Prices {#price}\nCosts $25.")
+        for copy in (self.prefix + "Old.\n" + self.suffix, "## Quote {#quote-price}"):
+            with self.subTest(copy=copy):
+                self.copy.write_text(copy)
+                code, _, err = self.sync()
+                self.assertEqual(code, docprop.EXIT_CLEAN, err)
+                self.assertIn("\nCosts $25.", self.copy.read_text())
+                self.assertEqual(self.check()[0], docprop.EXIT_CLEAN)
+                self.assertIn("nothing written", self.sync()[1])
+
+    def test_invalid_anchors_and_unsafe_content_refuse_writes(self):
+        cases = {
+            "missing": "## Different\nNew text.\n",
+            "duplicate explicit": "## One {#price}\nA\n## Two {#price}\nB\n",
+            "unclosed fence": "## Price {#price}\n```\nUnclosed code.\n",
+            "wrong level": "# Price {#price}\nNew text.\n",
+            "colliding destination ID": "## Price {#price}\n### Subsection {#quote-price}\nNew.\n",
+        }
+        for name, text in cases.items():
+            with self.subTest(name=name):
+                self.source.write_text(text)
+                before = self.copy.read_bytes()
+                code, report = self.check()
+                self.assertEqual(code, docprop.EXIT_FINDINGS)
+                self.assertEqual(report["mirrors"][0]["state"], "INVALID")
+                self.assertEqual(self.sync()[0], docprop.EXIT_ERROR)
+                self.assertEqual(self.copy.read_bytes(), before)
+
+    def test_invalid_destination_and_failed_replace_keep_original_file(self):
+        original = self.copy.read_bytes()
+        for body in ("## Wrong\nKeep.\n", self.prefix + "Old.\n## Duplicate {#quote-price}\nKeep.\n"):
+            with self.subTest(body=body):
+                self.copy.write_text(body)
+                self.assertEqual(self.check()[1]["mirrors"][0]["state"], "INVALID")
+                self.assertEqual(self.sync()[0], docprop.EXIT_ERROR)
+                self.assertEqual(self.copy.read_text(), body)
+        self.copy.write_bytes(original)
+        with patch.object(Path, "replace", side_effect=PermissionError("Replacement denied")):
+            code, _, err = self.sync()
+        self.assertEqual(code, docprop.EXIT_ERROR)
+        self.assertIn("Replacement denied", err)
+        self.assertEqual(self.copy.read_bytes(), original)
+        self.assertEqual(list(self.repo.glob(".docprop-*")), [])
+
+    def test_generated_anchor_collisions_include_non_atx_headings(self):
+        self.config.write_text(self.config.read_text().replace('"price"', '"prices"'))
+        for text in ("## Prices\nA\n## Prices\nB\n", "Prices\n------\nA\n## Prices\nB\n"):
+            with self.subTest(text=text):
+                self.source.write_text(text)
+                self.assertEqual(self.check()[1]["mirrors"][0]["state"], "INVALID")
+                before = self.copy.read_bytes()
+                self.assertEqual(self.sync()[0], docprop.EXIT_ERROR)
+                self.assertEqual(self.copy.read_bytes(), before)
+
+    def test_two_independent_copies_require_a_section_selector(self):
+        self.copy.write_text(self.copy.read_text() + "\n## Another {#second}\nOld second.\n")
+        entry = self.config.read_text()
+        self.config.write_text(entry + entry.replace('"quote-price"', '"second"'))
+        before = self.copy.read_bytes()
+        self.assertEqual(run_main("sync", "copy.md", "--repo", str(self.repo))[0], docprop.EXIT_ERROR)
+        self.assertEqual(self.copy.read_bytes(), before)
+        self.assertEqual(self.sync()[0], docprop.EXIT_CLEAN)
+        self.assertIn("Old second.", self.copy.read_text())
+        self.assertEqual(self.sync("second")[0], docprop.EXIT_CLEAN)
+        self.assertEqual(self.check()[0], docprop.EXIT_CLEAN)
+
+    def test_config_rejects_incomplete_duplicate_and_overlapping_destinations(self):
+        entry = self.config.read_text()
+        cases = [entry.replace('copy_section = "quote-price"\n', ''),
+                 entry.replace('copy_section = "quote-price"', 'copy_section = ""'),
+                 entry.replace('copy_section = "quote-price"', 'copy_section = "#quote-price"'),
+                 entry + entry,
+                 entry + '[[mirror]]\ncanonical = "source.md"\ncopy = "copy.md"\n',
+                 entry + entry.replace('"quote-price"', '"child"')]
+        self.copy.write_text(self.prefix + "\n### Child {#child}\nOld.\n" + self.suffix)
+        before = self.copy.read_bytes()
+        for text in cases:
+            with self.subTest(config=text):
+                self.config.write_text(text)
+                self.assertEqual(run_main("check", "--repo", str(self.repo))[0], docprop.EXIT_ERROR)
+                self.assertEqual(self.sync()[0], docprop.EXIT_ERROR)
+                self.assertEqual(self.copy.read_bytes(), before)
+
+    def test_same_file_disjoint_sections_work_and_overlapping_ones_fail(self):
+        self.config.write_text(self.config.read_text().replace('canonical = "source.md"',
+                                                             'canonical = "copy.md"'))
+        self.copy.write_text("## Source {#price}\nNew.\n\n" + self.copy.read_text())
+        self.assertEqual(self.sync()[0], docprop.EXIT_CLEAN)
+        self.assertEqual(self.check()[0], docprop.EXIT_CLEAN)
+        self.copy.write_text("## Source {#price}\nNew.\n### Copy {#quote-price}\nOld.\n")
+        before = self.copy.read_bytes()
+        self.assertEqual(self.sync()[0], docprop.EXIT_ERROR)
+        self.assertEqual(self.copy.read_bytes(), before)
 
 
 @unittest.skipUnless(LATTICE.is_file(), "doc-lattice is not installed")

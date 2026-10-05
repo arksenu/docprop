@@ -31,8 +31,10 @@ def markdown(report: dict | None, error: str = "", limit: int = 60000) -> str:
                     ["doc-lattice", "reconcile", item["downstream"], "--ref", item["target_ref"]])
         for item in report["mirrors"]:
             if "sync" in item:
-                item["sync"] = shlex.join(["python", "/path/to/docprop/docprop.py", "sync",
-                                           item["copy"], "--repo", "."])
+                parts = ["python", "/path/to/docprop/docprop.py", "sync", item["copy"], "--repo", "."]
+                if item.get("copy_section"):
+                    parts += ["--section", item["copy_section"]]
+                item["sync"] = shlex.join(parts)
         title = "Needs review" if report["needs_review"] else "Nothing needs review"
         detail = docprop.render_text(report, diff_lines=40)
     prefix = f"{MARKER}\n## docprop: {title}\n\nFlag-only review; no documents were changed.\n\n<pre>"
