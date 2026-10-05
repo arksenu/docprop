@@ -189,7 +189,7 @@ jobs:
         with:
           fetch-depth: 0
           persist-credentials: false
-      - uses: arksenu/docprop@7646bd9b9344cc2e5c5b8dae08ed568a6fc327c0
+      - uses: arksenu/docprop@722d9e36a75fd6f2f79d736d0ef92797c6867708
 ```
 
 The action installs Python 3.13 and doc-lattice 7.4.1, then runs `check --format json`.
