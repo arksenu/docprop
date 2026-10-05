@@ -1,0 +1,42 @@
+name: Tests
+on:
+  push:
+  pull_request:
+permissions:
+  contents: read
+jobs:
+  tests:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+      - uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1 # v6
+        with:
+          python-version: '3.13'
+      - run: python -I -m pip install 'doc-lattice==7.4.1'
+      - run: python -B -m unittest -q test_docprop test_doc_rewrite test_github_action
+      - name: Prepare mirror drift smoke test
+        shell: bash
+        run: |
+          mkdir "$RUNNER_TEMP/docprop-smoke"
+          printf '# Brief\nCurrent wording.\n' > "$RUNNER_TEMP/docprop-smoke/source.md"
+          printf '# Brief\nOld wording.\n' > "$RUNNER_TEMP/docprop-smoke/copy.md"
+          printf '[[mirror]]\ncanonical = "source.md"\ncopy = "copy.md"\n' > "$RUNNER_TEMP/docprop-smoke/.docprop.toml"
+      - uses: ./
+        id: smoke
+        with:
+          repo: ${{ runner.temp }}/docprop-smoke
+          github-token: ''
+      - name: Verify advisory findings
+        shell: bash
+        env:
+          DOCPROP_STATUS: ${{ steps.smoke.outputs.exit-code }}
+          DOCPROP_REVIEW: ${{ steps.smoke.outputs.needs-review }}
+          DOCPROP_REPORT: ${{ steps.smoke.outputs.report-path }}
+        run: |
+          test "$DOCPROP_STATUS" = 1
+          test "$DOCPROP_REVIEW" = true
+          test -s "$DOCPROP_REPORT"

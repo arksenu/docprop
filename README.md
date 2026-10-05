@@ -1,4 +1,4 @@
-# docprop: flag stale docs, never rewrite them (v1 core, local)
+# docprop: flag stale docs, never rewrite them
 
 When an upstream document changes, docprop tells you **which dependent documents need a look, what changed, and where to look first**. It never edits a linked document and never calls an AI model. (The v0 experiment had a model write the updates; only 2 of 9 were usable as written. See [EXPERIMENT.md](EXPERIMENT.md).)
 
@@ -11,7 +11,7 @@ It does two jobs:
 
 ## Roadmap status (v1: GitHub change-impact reviewer)
 
-The v0 gate failed, so v1 is **flag-only**: per the plan, "summarizes" rewrites stay off until the prompts improve. This folder is the local core of v1. The GitHub half isn't built yet.
+The v0 gate failed, so v1 is **flag-only**: per the plan, "summarizes" rewrites stay off until the prompts improve. The local CLI and GitHub Action are available; the remaining v1 items are tracked below.
 
 | Planned v1 item | Status |
 | --- | --- |
@@ -21,7 +21,7 @@ The v0 gate failed, so v1 is **flag-only**: per the plan, "summarizes" rewrites 
 | "summarizes" links: LLM rewrite | **Dropped by the v0 gate** (2 of 9 usable) |
 | Link type and downstream section anchor in the schema | **Not started.** doc-lattice rejects unknown keys, so these must live in docprop's own config (a superset), not in doc-lattice headers |
 | Meaning-change gate (skip wording-only edits) | **Not started** |
-| GitHub Action on PRs, with one summary comment | **Not started.** The next step. It needs `fetch-depth: 0` so baselines can be found in history |
+| GitHub Action on PRs, with one summary comment | **Done.** Advisory by default, optional blocking findings, job summary and one updated PR comment. Uses full Git history for baselines |
 | Lint: reject cycles; block derived edits that contradict the source | **Not started.** doc-lattice has no cycle check |
 
 ## Setup
@@ -114,6 +114,65 @@ copy = "latent-signals/01_strategy/product_brief.md"
 - **Declare** verbatim copies as mirrors, not links. Comparing them needs no heuristics.
 - **Don't link** chronological records such as dev logs and decision logs. They record what happened and don't derive from anything. Flags on them are noise, and v0 showed rewriting them invents history.
 
+## GitHub Action
+
+Add `.github/workflows/docprop.yml` to the documentation repository. Replace
+`FULL_COMMIT_SHA` with a reviewed commit from this repository that includes `action.yml`.
+
+```yaml
+name: Documentation impact
+on:
+  pull_request:
+    paths: ['**.md', '.doc-lattice.yml', '.docprop.toml', '.github/workflows/docprop.yml']
+permissions:
+  contents: read
+  pull-requests: write
+concurrency:
+  group: docprop-${{ github.event.pull_request.number }}
+  cancel-in-progress: true
+jobs:
+  review:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+      - uses: arksenu/docprop@FULL_COMMIT_SHA
+```
+
+The action installs Python 3.13 and doc-lattice 7.4.1, then runs `check --format json`.
+Findings are **advisory** by default: the job succeeds while the summary says what
+needs review. Set `fail-on-findings: 'true'` to make findings fail the job. Check
+errors always fail, including invalid configuration or an invalid report.
+
+Each run writes a job summary and creates or updates one `github-actions[bot]`
+comment, including when previously stale docs become clean. Fork PRs get the job
+summary only, because their token cannot write comments. A forbidden comment also
+leaves the summary available and produces a warning. The workflow uses
+`pull_request`; do not switch it to `pull_request_target` with PR code checked out.
+
+| Input | Default | Purpose |
+| --- | --- | --- |
+| `repo` | `.` | Checked-out documentation repository |
+| `fail-on-findings` | `'false'` | Fail when documents need review |
+| `github-token` | `${{ github.token }}` | Standard GitHub Actions token for the comment; empty disables comments |
+
+Outputs: `exit-code` (`0`, `1`, or `2`), `needs-review` (`true` for findings), and
+`report-path` (complete JSON file on the runner, absent on errors). The comment
+limits long reports; the job summary allows more detail and JSON retains full
+diffs. Run the CLI locally to inspect the complete report. Reconcile commands in
+comments run from the documentation repository after reviewing the linked text;
+mirror commands use `/path/to/docprop/docprop.py`, which you replace with your
+local clone's path.
+
+This action only reports findings. It does not push sync commits or acknowledge
+links automatically. The [latent-signals integration PR](https://github.com/arksenu/latent-signals/pull/1)
+includes the previously synced product-brief copy; its stale user-flow links still
+need human review. Section quotes, meaning-change gating and graph lint remain
+separate roadmap items.
+
 ## Commands
 
 | Command | Purpose |
@@ -125,7 +184,7 @@ copy = "latent-signals/01_strategy/product_brief.md"
 | `  --output FILE` | Write the report to a file |
 | `docprop.py sync COPY [--repo P] [--config F]` | Make a declared copy match its canonical file |
 
-Exit codes: **0** nothing needs review, **1** something needs review (a stale link, a link without a baseline, a broken link, or mirror drift), **2** error. Exit code 1 makes `check` usable as a CI gate later.
+Exit codes: **0** nothing needs review, **1** something needs review (a stale link, a link without a baseline, a broken link, or mirror drift), **2** error. The GitHub Action treats exit code 1 as advisory unless `fail-on-findings` is enabled.
 
 ## Evaluation on 24 real latent-signals edits
 
@@ -151,8 +210,10 @@ So: baselines were found 24/24, and pointers into copies and derived text are re
 | File | Role |
 | --- | --- |
 | `docprop.py` | v1 CLI (standard library + doc-lattice) |
-| `test_docprop.py` | 15 tests, including end-to-end runs against real doc-lattice and Git |
+| `test_docprop.py` | End-to-end runs against real doc-lattice and Git |
+| `action.yml`, `github_action.py` | GitHub Action, job summary and PR comment adapter |
+| `test_github_action.py`, `.github/workflows/tests.yml` | Action regression tests and CI smoke check |
 | `examples/latent-signals.docprop.toml` | Mirror declaration for the real product-brief copy |
 | `EXPERIMENT.md`, `doc_rewrite.py`, `benchmark.py`, `test_doc_rewrite.py` | Archived v0 rewrite experiment |
 
-Run tests: `.venv/bin/python -B -m unittest -v test_docprop test_doc_rewrite`
+Run tests: `.venv/bin/python -B -m unittest -v test_docprop test_doc_rewrite test_github_action`
