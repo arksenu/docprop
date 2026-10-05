@@ -1,0 +1,7 @@
+# Exact copies in latent-signals. Kept outside the clone so the input repo stays untouched.
+# Run from docprop/:
+#   .work/tools/venv/bin/python docprop.py check --repo inputs/latent-signals --config examples/latent-signals.docprop.toml
+
+[[mirror]]
+canonical = "product_brief.md"
+copy = "latent-signals/01_strategy/product_brief.md"

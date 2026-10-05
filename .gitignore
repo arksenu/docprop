@@ -1,0 +1,7 @@
+proposals/
+.venv/
+__pycache__/
+*.pyc
+.doc-lattice-cache/
+inputs/
+.work/
