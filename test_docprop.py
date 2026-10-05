@@ -239,6 +239,14 @@ class SectionQuoteTests(unittest.TestCase):
         self.assertIn("## Fees {#quote-price}", self.copy.read_text())
         self.assertEqual(self.check()[0], docprop.EXIT_CLEAN)
 
+    def test_markdown_hard_breaks_count_as_drift(self):
+        self.source.write_text("## Price {#price}\nFirst line.  \nSecond line.\n")
+        self.copy.write_text(self.prefix + "First line.\nSecond line.\n" + self.suffix)
+        self.assertEqual(self.check()[0], docprop.EXIT_FINDINGS)
+        self.assertEqual(self.sync()[0], docprop.EXIT_CLEAN)
+        self.assertIn("First line.  \nSecond line.", self.copy.read_text())
+        self.assertEqual(self.check()[0], docprop.EXIT_CLEAN)
+
     def test_end_of_file_without_newline_and_empty_destination(self):
         self.source.write_text("## Prices {#price}\nCosts $25.")
         for copy in (self.prefix + "Old.\n" + self.suffix, "## Quote {#quote-price}"):

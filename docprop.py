@@ -623,7 +623,7 @@ def mirror_status(repo: Path, mirror: Mirror) -> dict[str, Any]:
     else:
         _, body = split_header(canonical_text)
         _, copy_body = split_header(copy_text)
-    canonical, copy = canonical_lines(body), canonical_lines(copy_body)
+    canonical, copy = [normalize(text).strip("\n").split("\n") for text in (body, copy_body)]
     if canonical == copy:
         return {**item, "state": "IN_SYNC"}
     sections: list[str] = []
