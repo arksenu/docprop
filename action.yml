@@ -1,0 +1,62 @@
+name: docprop
+description: Flag stale documentation links and drifted copies, with one pull request summary.
+inputs:
+  repo:
+    description: Path to the checked-out documentation repository.
+    default: '.'
+  fail-on-findings:
+    description: Fail the check when documents need review (errors always fail).
+    default: 'false'
+  github-token:
+    description: GitHub Actions token with pull-requests write permission for the summary comment.
+    default: ${{ github.token }}
+outputs:
+  needs-review:
+    description: Whether the successful check found documents needing review.
+    value: ${{ steps.check.outputs.needs-review }}
+  exit-code:
+    description: CLI result (0 clean, 1 needs review, 2 error).
+    value: ${{ steps.check.outputs.exit-code }}
+  report-path:
+    description: JSON report file on the runner (absent on errors).
+    value: ${{ steps.check.outputs.report-path }}
+runs:
+  using: composite
+  steps:
+    - uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1 # v6
+      with:
+        python-version: '3.13'
+    - name: Install doc-lattice
+      shell: bash
+      run: python -I -m pip install 'doc-lattice==7.4.1'
+    - name: Check documentation
+      id: check
+      shell: bash
+      env:
+        DOCPROP_REPO: ${{ inputs.repo }}
+      run: python "$GITHUB_ACTION_PATH/github_action.py" check "$DOCPROP_REPO"
+    - name: Update pull request summary
+      shell: bash
+      env:
+        GITHUB_TOKEN: ${{ inputs.github-token }}
+        DOCPROP_SUMMARY: ${{ steps.check.outputs.summary-path }}
+      run: python "$GITHUB_ACTION_PATH/github_action.py" comment "$DOCPROP_SUMMARY"
+    - name: Set check result
+      if: ${{ always() && steps.check.outputs.exit-code != '' }}
+      shell: bash
+      env:
+        DOCPROP_STATUS: ${{ steps.check.outputs.exit-code }}
+        DOCPROP_FAIL: ${{ inputs.fail-on-findings }}
+      run: |
+        case "$DOCPROP_FAIL" in
+          true|false) ;;
+          *) echo '::error::fail-on-findings must be true or false'; exit 2 ;;
+        esac
+        if [ "$DOCPROP_STATUS" = 2 ]; then
+          echo '::error::docprop could not complete the check; see the job summary.'
+          exit 2
+        fi
+        if [ "$DOCPROP_STATUS" = 1 ] && [ "$DOCPROP_FAIL" = true ]; then
+          echo '::error::Documentation needs review; see the job summary.'
+          exit 1
+        fi
