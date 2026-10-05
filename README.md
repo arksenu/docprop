@@ -15,7 +15,7 @@ The v0 gate failed, so v1 is **flag-only**: per the plan, "summarizes" rewrites 
 
 | Planned v1 item | Status |
 | --- | --- |
-| Stateless graph from frontmatter, built on doc-lattice | **Done.** Applied to latent-signals in [PR #1](https://github.com/arksenu/latent-signals/pull/1) (not merged) |
+| Stateless graph from frontmatter, built on doc-lattice | **Done.** Applied to latent-signals in [PR #1](https://github.com/arksenu/latent-signals/pull/1) (merged with the advisory workflow) |
 | "assumes" links: flag with explanation | **Done.** Shows the reviewed baseline, the upstream diff, and where to look first |
 | "quotes" links: deterministic sync | **Partly done.** Whole-file mirrors work; section-level quotes don't yet |
 | "summarizes" links: LLM rewrite | **Dropped by the v0 gate** (2 of 9 usable) |
@@ -43,15 +43,13 @@ From the docprop folder, against a clone of [latent-signals](https://github.com/
 ```bash
 git clone https://github.com/arksenu/latent-signals ../latent-signals
 
-# 1. Real drift: the 01_strategy product-brief copy no longer matches the root brief.
-.venv/bin/python docprop.py check --repo ../latent-signals --config examples/latent-signals.docprop.toml
-
-# 2. With dependency markings (PR #1 branch): user_flows.md went stale when the brief changed in d0ed023.
-git -C ../latent-signals switch docprop/dependency-markings
+# user_flows.md went stale when the brief changed in d0ed023.
 .venv/bin/python docprop.py check --repo ../latent-signals
 ```
 
-Both exit with code 1 ("needs review"). Neither changes any file.
+The check exits with code 1 ("needs review") for the two user-flow links and changes
+no files. The strategy product-brief mirror was synced in the merged integration
+and now matches its canonical source.
 
 ## Reading a stale-link report
 
@@ -116,8 +114,8 @@ copy = "latent-signals/01_strategy/product_brief.md"
 
 ## GitHub Action
 
-Add `.github/workflows/docprop.yml` to the documentation repository. Replace
-`FULL_COMMIT_SHA` with a reviewed commit from this repository that includes `action.yml`.
+Add `.github/workflows/docprop.yml` to the documentation repository. This example
+pins the tested Action commit; update the pin after reviewing a newer version.
 
 ```yaml
 name: Documentation impact
@@ -139,7 +137,7 @@ jobs:
         with:
           fetch-depth: 0
           persist-credentials: false
-      - uses: arksenu/docprop@FULL_COMMIT_SHA
+      - uses: arksenu/docprop@aa4ccd7e243a072a9d4aae1fc2a2f03a44fb4978
 ```
 
 The action installs Python 3.13 and doc-lattice 7.4.1, then runs `check --format json`.
@@ -168,7 +166,7 @@ mirror commands use `/path/to/docprop/docprop.py`, which you replace with your
 local clone's path.
 
 This action only reports findings. It does not push sync commits or acknowledge
-links automatically. The [latent-signals integration PR](https://github.com/arksenu/latent-signals/pull/1)
+links automatically. The merged [latent-signals integration PR](https://github.com/arksenu/latent-signals/pull/1)
 includes the previously synced product-brief copy; its stale user-flow links still
 need human review. Section quotes, meaning-change gating and graph lint remain
 separate roadmap items.
@@ -196,7 +194,7 @@ Exit codes: **0** nothing needs review, **1** something needs review (a stale li
 | Stubs (17–21) | 5/5 | 5 | All are lines the author changed, but only because the stubs share "Not yet written" boilerplate |
 | Logs and summaries (01–15, 22, 23) | 17/17 | 29 | 9 matched real author fixes (13–15, the "v1 validated" wording cleanup). Case 06's 12 flags are old decision-log entries: history, not stale text. |
 
-So: baselines were found 24/24, and pointers into copies and derived text are reliable. The pointers can't anticipate *new* content an author adds, such as a new log entry or a newly written section; 23 of the author's 43 changed lines were of that kind. Mirror checks need no heuristics and caught the real drift that's still in `latent-signals` today: four sections of the copy, including Two Jobs to Be Done and V1 Scope.
+So: baselines were found 24/24, and pointers into copies and derived text are reliable. The pointers can't anticipate *new* content an author adds, such as a new log entry or a newly written section; 23 of the author's 43 changed lines were of that kind. Mirror checks need no heuristics and caught real drift in four sections of the copy, including Two Jobs to Be Done and V1 Scope. The copy was subsequently synced in the GitHub integration PR.
 
 ## Limits
 
