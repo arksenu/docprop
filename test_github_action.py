@@ -160,6 +160,14 @@ class ActionTests(unittest.TestCase):
         self.assertIn(shlex.join(["python", "/path/to/docprop/docprop.py", "sync",
                                   copy_path, "--repo", "."]), decoded)
         self.assertEqual(report, before)
+        report["mirrors"][0].update(canonical_section="price", copy_section="quoted-price")
+        section_report = html.unescape(action.markdown(report))
+        self.assertIn("--section quoted-price", section_report)
+        self.assertIn("copy's name.md#quoted-price", section_report)
+        report["mirrors"][0] = {"state": "INVALID", "canonical": "spec.md", "copy": copy_path,
+                                "canonical_section": "price", "copy_section": "quoted-price",
+                                "note": "Section is missing"}
+        self.assertIn("MIRROR INVALID", action.markdown(report))
         bounded = action.markdown(None, "<script>😀&" * 20000)
         self.assertLessEqual(len(bounded.encode()), 60000)
         self.assertIn("Report truncated", bounded)

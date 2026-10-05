@@ -13,7 +13,7 @@ Links and baselines belong to doc-lattice. For each stale link, docprop:
      replaced, so the reviewer knows where to look first.
 
 Exact copies ("mirrors") are declared in ``.docprop.toml`` and compared text for
-text; ``sync`` overwrites a copy's body with its canonical body.
+text; ``sync`` copies whole document bodies or explicitly selected section bodies.
 
 Exit codes: 0 nothing needs review, 1 something needs review, 2 error.
 """
@@ -52,6 +52,10 @@ STOPWORDS = frozenset(
 
 class DocpropError(Exception):
     """An expected failure, reported without a traceback (exit 2)."""
+
+
+class SectionError(DocpropError):
+    """A missing, ambiguous, or unsafe section selection."""
 
 
 # --------------------------------------------------------------------------- helpers
@@ -149,26 +153,55 @@ def canonical_lines(text: str) -> list[str]:
     return lines
 
 
-def section_text(text: str, target_ref: str) -> str:
-    """The body (whole-file ref) or one section (``id#anchor``), as doc-lattice addresses it."""
+def locate_section(text: str, target_ref: str) -> tuple[str, tuple[int, int], int]:
+    """Body, inclusive body-line span, and heading level, using doc-lattice's parser."""
     body = text[metadata_end(text):]
-    if "#" not in target_ref:
-        return body
     anchor = target_ref.split("#", 1)[1]
     try:
-        from doc_lattice.markdown_compat import anchor_ids
+        from doc_lattice.markdown_compat import (
+            addressable_heading_inventory, anchor_ids, collision_components, full_heading_inventory,
+        )
         from doc_lattice.sections import build_toc, section_spans, split_body_lines
-        from doc_lattice.sections import section_text as span_text
     except ImportError as exc:
         raise DocpropError("Run docprop with the Python environment that has doc-lattice "
-                           "installed (e.g. .work/tools/venv/bin/python)") from exc
+                           "installed (e.g. .venv/bin/python)") from exc
     headings = build_toc(body)
     ids = anchor_ids(headings)
     matches = [index for index, heading_id in enumerate(ids) if heading_id == anchor]
     if len(matches) != 1:
-        raise DocpropError(f"Section {target_ref} is not uniquely addressable in this revision")
+        raise SectionError(f"Section {target_ref} is missing or not uniquely addressable")
+    heading = headings[matches[0]]
+    if heading.anchor is None:
+        for inventory in (addressable_heading_inventory(headings), full_heading_inventory(body)):
+            if any(member.line == heading.line for group in collision_components(inventory)
+                   for member in group):
+                raise SectionError(f"Section {target_ref} is ambiguous; add a unique {{#id}} marker")
     spans = section_spans(headings, len(split_body_lines(body)))
-    return span_text(body, spans[matches[0]])
+    return body, spans[matches[0]], heading.level
+
+
+def section_text(text: str, target_ref: str) -> str:
+    """The body (whole-file ref) or one section (``id#anchor``), as doc-lattice addresses it."""
+    if "#" not in target_ref:
+        return text[metadata_end(text):]
+    body, span, _ = locate_section(text, target_ref)
+    from doc_lattice.sections import section_text as span_text
+    return span_text(body, span)
+
+
+def section_bounds(text: str, anchor: str) -> tuple[int, int, int]:
+    """Zero-based file-line slice including the heading, plus its level."""
+    text = normalize(text)
+    _, (start, end), level = locate_section(text, f"#{anchor}")
+    offset = text[:metadata_end(text)].count("\n")
+    return offset + start - 1, offset + end, level
+
+
+def section_parts(text: str, anchor: str) -> tuple[str, str, str, int]:
+    start, end, level = section_bounds(text, anchor)
+    # Split only actual newlines; Unicode separators are content in doc-lattice.
+    lines = re.findall(r"[^\r\n]*(?:\r\n|\r|\n|$)", text)
+    return "".join(lines[:start + 1]), "".join(lines[start + 1:end]), "".join(lines[end:]), level
 
 
 def safe_section(text: str, target_ref: str) -> str | None:
@@ -495,6 +528,8 @@ def check_links(repo: Path, binary: str, max_passages: int, base: str | None) ->
 class Mirror:
     canonical: str
     copy: str
+    canonical_section: str | None = None
+    copy_section: str | None = None
 
 
 def inside(repo: Path, value: str) -> Path:
@@ -521,36 +556,74 @@ def load_config(repo: Path, path: Path | None) -> list[Mirror]:
     if not isinstance(entries, list):
         raise DocpropError(f"'mirror' in {config} must be an array of tables ([[mirror]])")
     mirrors: list[Mirror] = []
-    copies: set[Path] = set()
+    copies: dict[Path, set[str | None]] = {}
     for number, entry in enumerate(entries, 1):
-        if (not isinstance(entry, dict) or set(entry) != {"canonical", "copy"}
+        if (not isinstance(entry, dict) or not {"canonical", "copy"} <= set(entry)
+                or set(entry) - {"canonical", "copy", "canonical_section", "copy_section"}
                 or not all(isinstance(value, str) for value in entry.values())):
             raise DocpropError(f"[[mirror]] #{number} in {config} needs exactly the string keys "
-                               "'canonical' and 'copy'")
+                               "'canonical' and 'copy', optionally with both "
+                               "'canonical_section' and 'copy_section'")
+        sections = [entry.get(key) for key in ("canonical_section", "copy_section")]
+        if any(value is not None for value in sections) and any(
+                not value or value != value.strip() or "#" in value or "\n" in value
+                or "\r" in value for value in sections):
+            raise DocpropError(f"[[mirror]] #{number}: both section IDs must be nonempty, "
+                               "without a leading # or whitespace")
         canonical, copy = inside(repo, entry["canonical"]), inside(repo, entry["copy"])
-        if canonical == copy:
+        if canonical == copy and sections[0] == sections[1]:
             raise DocpropError(f"[[mirror]] #{number}: canonical and copy are the same file")
-        if copy in copies:
-            raise DocpropError(f"[[mirror]] #{number}: {entry['copy']} is already declared as a copy")
-        copies.add(copy)
-        mirrors.append(Mirror(display(repo, canonical), display(repo, copy)))
+        previous = copies.setdefault(copy, set())
+        if previous and (None in previous or sections[1] is None or sections[1] in previous):
+            raise DocpropError(f"[[mirror]] #{number}: {entry['copy']} is already declared as a "
+                               "copy of this section or the whole file")
+        previous.add(sections[1])
+        mirrors.append(Mirror(display(repo, canonical), display(repo, copy), *sections))
+    for path, anchors in copies.items():
+        if len(anchors) < 2 or not path.is_file():
+            continue
+        ranges = []
+        text = read(path)
+        for anchor in anchors:
+            try:
+                start, end, _ = section_bounds(text, anchor)
+                ranges.append((start, end, anchor))
+            except SectionError:
+                continue  # check reports unresolvable sections; sync refuses them
+        ranges.sort()
+        for left, right in zip(ranges, ranges[1:]):
+            if right[0] < left[1]:
+                raise DocpropError(f"Overlapping mirror copies in {display(repo, path)}: "
+                                   f"{left[2]} and {right[2]}")
     return mirrors
 
 
-def heading_before(lines: list[str], index: int) -> str:
+def heading_before(lines: list[str], index: int, default: str = "(top of document)") -> str:
     for line in reversed(lines[: min(index, len(lines) - 1) + 1]):
         if match := HEADING.match(line):
             return match.group(1)
-    return "(top of document)"
+    return default
 
 
 def mirror_status(repo: Path, mirror: Mirror) -> dict[str, Any]:
     item: dict[str, Any] = {"canonical": mirror.canonical, "copy": mirror.copy}
+    if mirror.copy_section is not None:
+        item.update(canonical_section=mirror.canonical_section, copy_section=mirror.copy_section)
     missing = [name for name in (mirror.canonical, mirror.copy) if not (repo / name).is_file()]
     if missing:
         return {**item, "state": "MISSING", "missing": missing}
-    canonical = canonical_lines(split_header(read(repo / mirror.canonical))[1])
-    copy = canonical_lines(split_header(read(repo / mirror.copy))[1])
+    canonical_text, copy_text = read(repo / mirror.canonical), read(repo / mirror.copy)
+    if mirror.copy_section is not None:
+        try:
+            _, body, _, _ = section_parts(canonical_text, mirror.canonical_section)
+            _, copy_body, _, _ = section_parts(copy_text, mirror.copy_section)
+            replace_section(mirror, canonical_text, copy_text)
+        except SectionError as exc:
+            return {**item, "state": "INVALID", "note": str(exc)}
+    else:
+        _, body = split_header(canonical_text)
+        _, copy_body = split_header(copy_text)
+    canonical, copy = [normalize(text).strip("\n").split("\n") for text in (body, copy_body)]
     if canonical == copy:
         return {**item, "state": "IN_SYNC"}
     sections: list[str] = []
@@ -560,7 +633,7 @@ def mirror_status(repo: Path, mirror: Mirror) -> dict[str, Any]:
         if tag == "equal":
             continue
         changed += max(i2 - i1, j2 - j1)
-        name = heading_before(canonical, j1)
+        name = heading_before(canonical, j1, mirror.canonical_section or "(top of document)")
         if name not in sections:
             sections.append(name)
     diff = unified("\n".join(copy), "\n".join(canonical), f"{mirror.copy} (copy)",
@@ -568,24 +641,69 @@ def mirror_status(repo: Path, mirror: Mirror) -> dict[str, Any]:
     return {**item, "state": "DRIFTED", "sections": sections, "changed_lines": changed, "diff": diff}
 
 
-def sync_mirror(repo: Path, mirrors: list[Mirror], copy_arg: str) -> str:
+def replace_section(mirror: Mirror, canonical: str, copy: str) -> str:
+    prefix, _, suffix, level = section_parts(copy, mirror.copy_section)
+    _, body, _, source_level = section_parts(canonical, mirror.canonical_section)
+    # ponytail: preserve nested heading levels; require matching roots until releveling is needed.
+    if source_level != level:
+        raise SectionError("Quoted sections must have the same heading level; headings are preserved")
+    if mirror.canonical == mirror.copy:
+        source_start, source_end, _ = section_bounds(canonical, mirror.canonical_section)
+        copy_start, copy_end, _ = section_bounds(copy, mirror.copy_section)
+        if source_start < copy_end and copy_start < source_end:
+            raise SectionError("Canonical and copy sections overlap in the same file")
+    ending = "\r\n" if "\r\n" in copy else "\r" if "\r" in copy and "\n" not in copy else "\n"
+    body = normalize(body).replace("\n", ending)
+    if body and not prefix.endswith(("\r", "\n")):
+        prefix += ending
+    if body and suffix and not body.endswith(("\r", "\n")):
+        body += ending
+    updated = prefix + body + suffix
+    new_prefix, _, new_suffix, _ = section_parts(updated, mirror.copy_section)
+    if new_prefix != prefix or new_suffix != suffix:
+        raise SectionError("Copying this content would change section boundaries (check fences and anchors)")
+    return updated
+
+
+def sync_mirror(repo: Path, mirrors: list[Mirror], copy_arg: str, section: str | None = None) -> str:
     target = inside(repo, copy_arg)
-    mirror = next((m for m in mirrors if (repo / m.copy).resolve() == target), None)
+    mirror = next((m for m in mirrors if (repo / m.copy).resolve() == target
+                   and m.copy_section == section), None)
     if mirror is None:
-        raise DocpropError(f"{copy_arg} is not a declared mirror copy (see .docprop.toml)")
+        raise DocpropError(f"{copy_arg} is not a declared mirror copy for this selection "
+                           "(see .docprop.toml; section copies require --section ID)")
     try:
         raw_copy = target.read_bytes().decode("utf-8")
     except (OSError, UnicodeDecodeError) as exc:
         raise DocpropError(f"Cannot read {target}: {exc}") from exc
-    header, _ = split_header(normalize(raw_copy))
-    _, body = split_header(read(repo / mirror.canonical))
-    updated = header + (body.lstrip("\n") if header else body)
-    if "\r\n" in raw_copy:
-        updated = updated.replace("\n", "\r\n")
+    if section is not None:
+        updated = replace_section(mirror, read(repo / mirror.canonical), raw_copy)
+        for other in mirrors:
+            if other.copy == mirror.copy and other.copy_section != section:
+                section_bounds(updated, other.copy_section)
+    else:
+        header, _ = split_header(normalize(raw_copy))
+        _, body = split_header(read(repo / mirror.canonical))
+        updated = header + (body.lstrip("\n") if header else body)
+        if "\r\n" in raw_copy:
+            updated = updated.replace("\n", "\r\n")
     if updated == raw_copy:
         return f"{mirror.copy} already matches {mirror.canonical}; nothing written."
-    target.write_bytes(updated.encode("utf-8"))
-    return (f"Synced {mirror.copy} from {mirror.canonical} (header kept). Review the change with "
+    temporary = None
+    try:
+        with tempfile.NamedTemporaryFile(dir=target.parent, prefix=".docprop-", delete=False) as stream:
+            temporary = Path(stream.name)
+            stream.write(updated.encode("utf-8"))
+        temporary.chmod(target.stat().st_mode)
+        temporary.replace(target)
+    except OSError as exc:
+        raise DocpropError(f"Cannot write {target}: {exc}") from exc
+    finally:
+        if temporary is not None:
+            temporary.unlink(missing_ok=True)
+    kept = "heading and surrounding text kept" if section else "header kept"
+    return (f"Synced {mirror.copy}{'#' + section if section else ''} from {mirror.canonical} "
+            f"({kept}). Review the change with "
             "`git diff`; if the copy is doc-lattice tracked, run `docprop.py check` again.")
 
 
@@ -598,6 +716,8 @@ def build_report(repo: Path, mirrors: list[Mirror], args: argparse.Namespace) ->
     for item in mirror_items:
         if item["state"] == "DRIFTED":
             parts = [sys.executable, str(script), "sync", item["copy"], "--repo", str(repo)]
+            if item.get("copy_section"):
+                parts += ["--section", item["copy_section"]]
             if args.config:
                 parts += ["--config", str(Path(args.config).expanduser().resolve())]
             item["sync"] = " ".join(shlex.quote(part) for part in parts)
@@ -655,17 +775,23 @@ def render_link(item: dict[str, Any], diff_lines: int) -> list[str]:
 
 
 def render_mirror(item: dict[str, Any], diff_lines: int) -> list[str]:
+    canonical, copy = item["canonical"], item["copy"]
+    if item.get("copy_section"):
+        canonical += "#" + item["canonical_section"]
+        copy += "#" + item["copy_section"]
     if item["state"] == "IN_SYNC":
-        return [f"MIRROR OK  {item['copy']} matches {item['canonical']}", ""]
+        return [f"MIRROR OK  {copy} matches {canonical}", ""]
     if item["state"] == "MISSING":
         return [f"MIRROR MISSING  {', '.join(item['missing'])} (declared in .docprop.toml)", ""]
-    out = [f"MIRROR DRIFTED  {item['copy']}  (copy of {item['canonical']})",
+    if item["state"] == "INVALID":
+        return [f"MIRROR INVALID  {copy}  (copy of {canonical})", f"  {item['note']}", ""]
+    out = [f"MIRROR DRIFTED  {copy}  (copy of {canonical})",
            f"  {item['changed_lines']} line(s) differ, in: {'; '.join(item['sections'])}"]
     body = [line for line in item["diff"] if not line.startswith(("---", "+++"))]
     out += [f"    {clip(line, 150)}" for line in body[:diff_lines]]
     if len(body) > diff_lines:
         out.append(f"    ... {len(body) - diff_lines} more diff lines")
-    out += ["  To make the copy match the canonical file (plain copy, header kept):",
+    out += ["  To make the declared copy match its source (surrounding text kept):",
             f"    {item['sync']}", ""]
     return out
 
@@ -709,6 +835,7 @@ def parser() -> argparse.ArgumentParser:
     sync = sub.add_parser("sync", help="Overwrite a declared mirror copy's body with its "
                                        "canonical body (header kept)")
     sync.add_argument("copy", help="The copy's path, relative to --repo")
+    sync.add_argument("--section", help="Destination section ID from .docprop.toml")
     for command in (check, sync):
         command.add_argument("--repo", type=Path, default=Path("."),
                              help="Documentation repository (default: current directory)")
@@ -726,7 +853,7 @@ def main(argv: list[str] | None = None) -> int:
         config = args.config.expanduser().resolve() if args.config else None
         mirrors = load_config(repo, config)
         if args.command == "sync":
-            print(sync_mirror(repo, mirrors, args.copy))
+            print(sync_mirror(repo, mirrors, args.copy, args.section))
             return EXIT_CLEAN
         if args.max_passages < 1 or args.diff_lines < 1:
             raise DocpropError("--max-passages and --diff-lines must be at least 1")

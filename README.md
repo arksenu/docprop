@@ -7,7 +7,7 @@ It does two jobs:
 | Job | What you declare | What docprop reports |
 | --- | --- | --- |
 | **Stale links** | "This doc derives from that doc (or section)," via [doc-lattice](https://github.com/Guardantix/doc-lattice) frontmatter | The upstream version you last reviewed, what changed since, and downstream passages that still use wording the change removed |
-| **Exact copies** ("mirrors") | "This file is a verbatim copy of that one," in `.docprop.toml` | Whether the copy drifted, in which sections; `sync` makes it match with a plain copy |
+| **Exact copies** ("mirrors") | "This file or section copies that one," in `.docprop.toml` | Whether the copy drifted; `sync` makes the declared body match with a plain copy |
 
 ## Roadmap status (v1: GitHub change-impact reviewer)
 
@@ -17,9 +17,9 @@ The v0 gate failed, so v1 is **flag-only**: per the plan, "summarizes" rewrites 
 | --- | --- |
 | Stateless graph from frontmatter, built on doc-lattice | **Done.** Applied to latent-signals in [PR #1](https://github.com/arksenu/latent-signals/pull/1) (merged with the advisory workflow) |
 | "assumes" links: flag with explanation | **Done.** Shows the reviewed baseline, the upstream diff, and where to look first |
-| "quotes" links: deterministic sync | **Partly done.** Whole-file mirrors work; section-level quotes don't yet |
+| "quotes" links: deterministic sync | **Done.** Whole-file mirrors and section-body quotes; manual `sync` preserves surrounding text |
 | "summarizes" links: LLM rewrite | **Dropped by the v0 gate** (2 of 9 usable) |
-| Link type and downstream section anchor in the schema | **Not started.** doc-lattice rejects unknown keys, so these must live in docprop's own config (a superset), not in doc-lattice headers |
+| Link type and downstream section anchor in the schema | **Partly done.** Quote section IDs on both ends live in `.docprop.toml`. General link types and downstream scoping for `assumes`/`summarizes` remain |
 | Meaning-change gate (skip wording-only edits) | **Not started** |
 | GitHub Action on PRs, with one summary comment | **Done.** Advisory by default, optional blocking findings, job summary and one updated PR comment. Uses full Git history for baselines |
 | Lint: reject cycles; block derived edits that contradict the source | **Not started.** doc-lattice has no cycle check |
@@ -106,6 +106,58 @@ copy = "latent-signals/01_strategy/product_brief.md"
 
 `docprop.py sync COPY --repo PATH` replaces the copy's body with the canonical body. It keeps the copy's own header: frontmatter, plus leading HTML comments such as `<!-- Canonical version: ... -->`. Review with `git diff`, then commit.
 
+### Section quotes
+
+Add both section IDs to a mirror declaration to copy only one section's body:
+
+```toml
+[[mirror]]
+canonical = "product_brief.md"
+canonical_section = "pricing"
+copy = "faq.md"
+copy_section = "quoted-pricing"
+```
+
+The headings may have different titles. Use explicit doc-lattice IDs to keep the
+selection stable when titles change:
+
+```markdown
+## Pricing {#pricing}
+
+The plan costs $25 per month.
+```
+
+In `faq.md`:
+
+```markdown
+## What does it cost? {#quoted-pricing}
+
+The plan costs $20 per month.
+```
+
+```bash
+.venv/bin/python docprop.py check --repo ../my-docs
+.venv/bin/python docprop.py sync faq.md --section quoted-pricing --repo ../my-docs
+```
+
+Sync copies the source section body, including nested subsections, while keeping
+the destination heading, its ID, and all surrounding text. Both selected headings
+must be at the same level (`##` in this example); nested headings are copied
+literally, without releveling or rewriting relative links. Repeating sync makes no
+further changes. It does not acknowledge any doc-lattice links automatically.
+
+Section IDs use doc-lattice's column-zero ATX heading rules. Generated heading
+slugs also work when unambiguous. Missing sections, ambiguous IDs, mismatched
+heading levels, and content that would swallow the next section are reported as
+`MIRROR INVALID`; sync refuses them. A renamed explicit ID must be updated in the
+config. `check` never modifies files.
+
+Several disjoint sections can be copied into the same file, including from a
+different section of that file. Nested or overlapping destinations and a mixture
+of whole-file and section destinations in one file are rejected. Section copies
+always require `--section ID`; omitting it cannot overwrite the whole file.
+Existing whole-file mirror declarations and commands remain valid.
+
 ### What to link (from the benchmark)
 
 - **Link** documents that are derived from another: a summary, a spec built from a brief, a FAQ built from a pricing page.
@@ -137,7 +189,7 @@ jobs:
         with:
           fetch-depth: 0
           persist-credentials: false
-      - uses: arksenu/docprop@aa4ccd7e243a072a9d4aae1fc2a2f03a44fb4978
+      - uses: arksenu/docprop@722d9e36a75fd6f2f79d736d0ef92797c6867708
 ```
 
 The action installs Python 3.13 and doc-lattice 7.4.1, then runs `check --format json`.
@@ -168,8 +220,9 @@ local clone's path.
 This action only reports findings. It does not push sync commits or acknowledge
 links automatically. The merged [latent-signals integration PR](https://github.com/arksenu/latent-signals/pull/1)
 includes the previously synced product-brief copy; its stale user-flow links still
-need human review. Section quotes, meaning-change gating and graph lint remain
-separate roadmap items.
+need human review. Section quote findings use the same report and PR comment;
+the pinned example includes section quote support. Meaning-change gating and
+graph lint remain separate roadmap items.
 
 ## Commands
 
@@ -181,6 +234,7 @@ separate roadmap items.
 | `  --max-passages N`, `--diff-lines N` | Output size (defaults 8 and 40) |
 | `  --output FILE` | Write the report to a file |
 | `docprop.py sync COPY [--repo P] [--config F]` | Make a declared copy match its canonical file |
+| `  --section ID` | Sync only the declared destination section body |
 
 Exit codes: **0** nothing needs review, **1** something needs review (a stale link, a link without a baseline, a broken link, or mirror drift), **2** error. The GitHub Action treats exit code 1 as advisory unless `fail-on-findings` is enabled.
 
@@ -200,7 +254,7 @@ So: baselines were found 24/24, and pointers into copies and derived text are re
 
 - "Look here first" uses wording overlap only. It catches stale phrases, numbers, and versions, not reworded ideas. Always read the upstream change.
 - The reviewed version must be in Git history: run reconcile, then commit. Otherwise use `--base`. History search covers the latest 100 commits that touched the upstream file and follows renames.
-- Needs doc-lattice ≥ 7.4 and Python ≥ 3.13 (see Setup).
+- Needs doc-lattice ≥ 7.4.1 and Python ≥ 3.13 (see Setup).
 - docprop doesn't suggest links. You declare what depends on what.
 
 ## Files
